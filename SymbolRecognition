@@ -1,0 +1,170 @@
+// Include files for required libraries
+#include <stdio.h>
+#include <iostream>
+#include "opencv2/core.hpp"
+#include "opencv2/highgui.hpp"
+#include "opencv2/imgproc.hpp"
+
+#include "opencv_aee.hpp"
+#include "main.hpp"     // You can use this file for declaring defined values and functions
+
+using namespace cv;
+using namespace std;
+
+
+// function to get the contour with the largest area
+int getLargestContourID(vector <vector<Point>> contours) {
+    double maxArea = 0;
+    int largestContourID = 0;
+    for (int i=0; i<contours.size(); i++) {
+        double newArea = contourArea(contours.at(i));
+        if (newArea > maxArea) {
+            maxArea = newArea;
+            largestContourID = i;
+        }
+    }
+    return largestContourID;
+}
+
+// function to get the contour with the second largest area
+int getSecContourID(vector <vector<Point>> contours) {
+    double maxArea = 0;
+    double secArea = 0;
+    int largestContourID = 0;
+    int secAreaContourID = 0;
+    for (int i=0; i<contours.size(); i++) {
+        double newArea = contourArea(contours.at(i));
+        if (newArea > maxArea) {
+            secArea = maxArea;
+            secAreaContourID = largestContourID;
+            maxArea = newArea;
+            largestContourID = i;
+        }
+        else if (newArea > secArea) {
+            secArea = newArea;
+            secAreaContourID = i;
+        }
+    }
+    return secAreaContourID;
+}
+
+int main() {
+    // start the raspberry pi camera with dimensions defined
+    setupCamera(320,240);
+
+    Mat hsvCircle, hsvStar, hsvTriangle, hsvUmbrella;
+    Mat circleMask, starMask, triangleMask, umbrellaMask;
+
+    // reading in all the symbol images
+    Mat circle = imread("Circle (Red Line).png");
+    Mat star = imread("Star (Green Line).png");
+    Mat triangle = imread("Triangle (Blue Line).png");
+    Mat umbrella = imread("Umbrella (Yellow Line).png");
+
+    // converting symbol images in BGR to HSV
+    cvtColor(circle, hsvCircle, COLOR_BGR2HSV);
+    cvtColor(star, hsvStar, COLOR_BGR2HSV);
+    cvtColor(triangle, hsvTriangle, COLOR_BGR2HSV);
+    cvtColor(umbrella, hsvUmbrella, COLOR_BGR2HSV);
+
+    // defining range of pink in HSV
+    Scalar lower_pink(122, 9, 0);
+    Scalar upper_pink(179, 175, 200);
+
+    // masking the pink colour in the images (pink turns to white, everything else to black)
+    inRange(hsvCircle, lower_pink, upper_pink, circleMask);
+    inRange(hsvStar, lower_pink, upper_pink, starMask);
+    inRange(hsvTriangle, lower_pink, upper_pink, triangleMask);
+    inRange(hsvUmbrella, lower_pink, upper_pink, umbrellaMask);
+
+    while (true) {
+        Mat frame, hsv, mask;
+
+        // capture camera frame
+        while (frame.empty())
+            frame = captureFrame();
+
+        // converting camera feed from BGR to HSV
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        // masking pink in the camera feed
+        inRange(hsv, lower_pink, upper_pink, mask);
+
+        Mat dilated;
+        vector< vector<Point> > contours;
+        vector<Vec4i> hierarchy;
+
+        // finding the initial contours
+        int thresh = 100;
+        Canny(mask, dilated, thresh, thresh*2, 3);
+        findContours(dilated,   contours,   hierarchy,  RETR_TREE,CHAIN_APPROX_SIMPLE, Point(0,0));
+
+        if (contours.empty() == false) { // if statement to negate error when camera doesn't find contours
+
+            Mat drawing = Mat::zeros(dilated.size(), CV_8UC3);
+            for (int i=0; i < contours.size(); i++) {
+                drawContours(drawing, contours, i, Scalar(0,0,255), 2, LINE_8, noArray(), 0, Point()); // drawing the initial contours
+            }
+
+            int largestID = getLargestContourID(contours);
+            int secID = getSecContourID(contours);
+
+            // use of bounding rectangles to identify which contour is the square
+            Rect box1 = boundingRect(contours[largestID]);
+            Rect box2 = boundingRect(contours[secID]);
+
+            vector<Point> squareContour;
+
+            // if statement used to simplify contours depending on if the square contour has a smaller or larger area than the shape contour
+            if (box1.area() > box2.area()) {
+                approxPolyDP(contours.at(largestID), squareContour, arcLength(contours.at(largestID), true) * 0.02, true); // simplify contours
+            }
+            else {
+                approxPolyDP(contours.at(secID), squareContour, arcLength(contours.at(secID), true) * 0.02, true);
+            }
+
+            Mat transformed = transformPerspective(squareContour, frame, 350, 350); // transforming the perspective of the symbol seen by the camera to birds eye view
+            Mat hsvSymbol;
+            Mat symbolMask;
+
+            if (transformed.empty() == false) // if statement to negate error when the 'transformed' matrix is empty, i.e. when camera doesn't see a symbol
+            {
+                cvtColor(transformed, hsvSymbol, COLOR_BGR2HSV); // convert the transformed image from BGR to HSV
+
+                // masking the pink in the transformed image
+                inRange(hsvSymbol, lower_pink, upper_pink, symbolMask);
+
+                imshow("Transformed", symbolMask); // display the masked transformed image
+
+                // functions to generate a percentage comparison between the transformed image feed and each symbol image file (both masked)
+                float compareCircle = compareImages(symbolMask, circleMask);
+                float compareStar = compareImages(symbolMask, starMask);
+                float compareTriangle = compareImages(symbolMask, triangleMask);
+                float compareUmbrella = compareImages(symbolMask, umbrellaMask);
+                
+                // printing the result for each match
+                printf("Circle Match: %f \n", compareCircle);
+                printf("Star Match: %f \n", compareStar);
+                printf("Triangle Match: %f \n", compareTriangle);
+                printf("Umbrella Match: %f \n", compareUmbrella);
+            }
+
+        }
+
+
+        imshow("Original Feed", frame); // display the live camera feed
+        imshow("Masked Feed", mask); // display the masked camera feed
+
+
+        int key = waitKey(1);   // Wait 1ms for a keypress (required to update windows)
+
+        key = (key==255) ? -1 : key;    // Check if the ESC key has been pressed
+        if (key == 27) {
+            break;
+        }
+    }
+
+    closeCV();
+
+    return 0;
+}
